@@ -2041,7 +2041,7 @@ static void execute_realtime (uint_fast16_t state)
 #endif // ADD_MSEVENT
 
 #if defined(SPINDLE_ODRIVE) && CAN_ENABLE
-    canbus_events(state);
+    // canbus_events(state);
 #endif
 
 #if ETHERNET_ENABLE

@@ -2,19 +2,11 @@
 #include "grbl/protocol.h"
 #include "grbl/state_machine.h"
 
-#if CAN_ENABLE == 1
+#if CAN_ENABLE
 
-#include <stdio.h>
 #include "can_t4.h"
-#include <string.h>
+#include <stdio.h>
 #include "kinetis_can_t4.h"
-
-typedef enum CAN_DEV_TABLE {
-  CAN0 = 0x0,
-  CAN1 = 0x401D0000,
-  CAN2 = 0x401D4000,
-  CAN3 = 0x401D8000
-} CAN_DEV_TABLE;
 
 #define _bus CAN2
 #define nvicIrq IRQ_CAN2
@@ -50,7 +42,7 @@ static CANListener *listener[SIZE_LISTENERS];
 
 static int mailboxOffset();
 void canbus_execute_buf(sys_state_t state);
-CAN_sync_message_t *canbus_write_sync_msg(CAN_message_t *msg, bool enable);
+CAN_sync_message_t* canbus_write_sync_msg(CAN_message_t *msg, bool enable);
 volatile uint32_t fifo_filter_table[32][6] = {0};
 volatile uint32_t mb_filter_table[64][6] = {0};
 static _MB_ptr _mbHandlers[64] = {0}; /* individual mailbox handlers */
@@ -60,6 +52,7 @@ static _MB_ptr _mainTxHandler = {0}; /* global mailbox handler */
 static uint32_t currentBitrate = 0;
 static uint8_t mailbox_reader_increment = 0;
 static on_report_options_ptr on_report_options;
+static on_execute_realtime_ptr on_execute_realtime;
 static bool initOK = false;
 static bool canbus_On = false;
 
@@ -237,7 +230,7 @@ static uint32_t getClock() {
   return clocksrc[(CCM_CSCMR2 & 0x300) >> 8];
 }
 
-static void setBaudRate(uint32_t baud, FLEXCAN_RXTX listen_only) {
+static void setBaudRate(uint32_t baud, int listen_only) {
   currentBitrate = baud;
 
   uint32_t clockFreq = getClock() * 1000000;
@@ -302,22 +295,20 @@ static void setBaudRate(uint32_t baud, FLEXCAN_RXTX listen_only) {
   }, propSeg = bitTimingTable[result][0], pSeg1 = bitTimingTable[result][1], pSeg2 = bitTimingTable[result][2];
   FLEXCANb_CTRL1(_bus) = (FLEXCAN_CTRL_PROPSEG(propSeg) | FLEXCAN_CTRL_RJW(1) | FLEXCAN_CTRL_PSEG1(pSeg1) |
                     FLEXCAN_CTRL_PSEG2(pSeg2) | FLEXCAN_CTRL_ERR_MSK | FLEXCAN_CTRL_PRESDIV(divisor));
-  ( listen_only != LISTEN_ONLY ) ? FLEXCANb_CTRL1(_bus) &= ~FLEXCAN_CTRL_LOM : (FLEXCANb_CTRL1(_bus) |= FLEXCAN_CTRL_LOM); /* listen-only mode */
+  ( listen_only != FLEXCAN_LISTEN_ONLY ) ? FLEXCANb_CTRL1(_bus) &= ~FLEXCAN_CTRL_LOM : (FLEXCANb_CTRL1(_bus) |= FLEXCAN_CTRL_LOM); /* listen-only mode */
   if ( frz_flag_negate ) FLEXCAN_ExitFreezeMode();
 }
 
-static void setClock(FLEXCAN_CLOCK clock) {
+static void setClock(int clock) {
   if ( clock == CLK_OFF ) CCM_CSCMR2 = (CCM_CSCMR2 & 0xFFFFFC03) | CCM_CSCMR2_CAN_CLK_SEL(3) | CCM_CSCMR2_CAN_CLK_PODF(0);
   if ( clock == CLK_8MHz ) CCM_CSCMR2 = (CCM_CSCMR2 & 0xFFFFFC03) | CCM_CSCMR2_CAN_CLK_SEL(2) | CCM_CSCMR2_CAN_CLK_PODF(9);
   if ( clock == CLK_16MHz ) CCM_CSCMR2 = (CCM_CSCMR2 & 0xFFFFFC03) | CCM_CSCMR2_CAN_CLK_SEL(2) | CCM_CSCMR2_CAN_CLK_PODF(4);
-  if ( clock == CLK_24MHz ) CCM_CSCMR2 = (CCM_CSCMR2 & 0xFFFFFC03) | CCM_CSCMR2_CAN_CLK_SEL(1) | CCM_CSCMR2_CAN_CLK_PODF(0);
   if ( clock == CLK_20MHz ) CCM_CSCMR2 = (CCM_CSCMR2 & 0xFFFFFC03) | CCM_CSCMR2_CAN_CLK_SEL(2) | CCM_CSCMR2_CAN_CLK_PODF(3);
-  if ( clock == CLK_30MHz ) CCM_CSCMR2 = (CCM_CSCMR2 & 0xFFFFFC03) | CCM_CSCMR2_CAN_CLK_SEL(0) | CCM_CSCMR2_CAN_CLK_PODF(1);
+  if ( clock == CLK_24MHz ) CCM_CSCMR2 = (CCM_CSCMR2 & 0xFFFFFC03) | CCM_CSCMR2_CAN_CLK_SEL(1) | CCM_CSCMR2_CAN_CLK_PODF(0);
   if ( clock == CLK_40MHz ) CCM_CSCMR2 = (CCM_CSCMR2 & 0xFFFFFC03) | CCM_CSCMR2_CAN_CLK_SEL(2) | CCM_CSCMR2_CAN_CLK_PODF(1);
   if ( clock == CLK_60MHz ) CCM_CSCMR2 = (CCM_CSCMR2 & 0xFFFFFC03) | CCM_CSCMR2_CAN_CLK_SEL(0) | CCM_CSCMR2_CAN_CLK_PODF(0);
-  if ( clock == CLK_80MHz ) CCM_CSCMR2 = (CCM_CSCMR2 & 0xFFFFFC03) | CCM_CSCMR2_CAN_CLK_SEL(2) | CCM_CSCMR2_CAN_CLK_PODF(0);
 
-  setBaudRate(currentBitrate, (( FLEXCANb_CTRL1(_bus) & FLEXCAN_CTRL_LOM ) ? LISTEN_ONLY : TX));
+  setBaudRate(currentBitrate, (( FLEXCANb_CTRL1(_bus) & FLEXCAN_CTRL_LOM ) ? FLEXCAN_LISTEN_ONLY : FLEXCAN_TX));
 }
 
 static void enableFIFOInterrupt(bool status) {
@@ -388,7 +379,7 @@ static void setMBFilterProcessing(FLEXCAN_MAILBOX mb_num, uint32_t filter_id, ui
   if ( frz_flag_negate ) FLEXCAN_ExitFreezeMode();
 }
 
-static void fifo_filter_store(FLEXCAN_FILTER_TABLE type, uint8_t filter, uint32_t id_count, uint32_t id1, uint32_t id2, uint32_t id3, uint32_t id4, uint32_t id5) {
+static void fifo_filter_store(int type, uint8_t filter, uint32_t id_count, uint32_t id1, uint32_t id2, uint32_t id3, uint32_t id4, uint32_t id5) {
   fifo_filter_table[filter][0] = (fifo_filter_table[filter][0] & 0xF0000) | filter; // first 7 bits reserved for fifo filter
   fifo_filter_table[filter][0] |= (id_count << 7); // we store the quantity of ids after the fifo filter count 
   /* bit 16-19: extended ids */
@@ -401,7 +392,7 @@ static void fifo_filter_store(FLEXCAN_FILTER_TABLE type, uint8_t filter, uint32_
   fifo_filter_table[filter][5] = id5; // id5
 }
 
-static void filter_store(FLEXCAN_FILTER_TABLE type, FLEXCAN_MAILBOX mb_num, uint32_t id_count, uint32_t id1, uint32_t id2, uint32_t id3, uint32_t id4, uint32_t id5) {
+static void filter_store(int type, FLEXCAN_MAILBOX mb_num, uint32_t id_count, uint32_t id1, uint32_t id2, uint32_t id3, uint32_t id4, uint32_t id5) {
   mb_filter_table[mb_num][0] = mb_num; // first 7 bits reserved for MB
   mb_filter_table[mb_num][0] |= (id_count << 7); // we store the quantity of ids after the mailboxes 
   /* bit 28: filter enabled */
@@ -554,66 +545,58 @@ int write_mb(FLEXCAN_MAILBOX mb_num, CAN_message_t *msg) {
   if ( mb_num < mailboxOffset() ) return 0; /* FIFO doesn't transmit */
   volatile uint32_t *mbxAddr = &(*(volatile uint32_t*)(_bus + 0x80 + (mb_num * 0x10)));
   if ( !((FLEXCAN_get_code(mbxAddr[0])) >> 3) ) return 0; /* not a transmit mailbox */
-  // if ( msg->seq ) {
     int first_tx_mb = getFirstTxBox();
     if ( FLEXCAN_get_code(FLEXCANb_MBn_CS(_bus, first_tx_mb)) == FLEXCAN_MB_CODE_TX_INACTIVE ) {
       writeTxMailbox(first_tx_mb, msg);
       return 1; /* transmit entry accepted */
     }
-    else {
-      // CAN_message_t msg_copy = msg;
-      msg->mb = first_tx_mb;
-      add_buf(&tx_buf,msg); /* queue if no mailboxes found */
-      return -1; /* transmit entry failed, no mailboxes available, queued */
-    }
-  // }
+  else {
+    msg->mb = first_tx_mb;
+    add_buf(&tx_buf,msg); /* queue if no mailboxes found */
+    return -1; /* transmit entry failed, no mailboxes available, queued */
+  }
   if ( FLEXCAN_get_code(mbxAddr[0]) == FLEXCAN_MB_CODE_TX_INACTIVE ) {
     writeTxMailbox(mb_num, msg);
     return 1;
   }
-  // CAN_message_t msg_copy = msg;
   msg->mb = mb_num;
   add_buf(&tx_buf, msg); /* queue if no mailboxes found */
   return -1; /* transmit entry failed, no mailboxes available, queued */
 }
 
 int write(CAN_message_t *msg) {
-  // if ( msg->seq ) {
-    int first_tx_mb = getFirstTxBox();
-    if ( FLEXCAN_get_code(FLEXCANb_MBn_CS(_bus, first_tx_mb)) == FLEXCAN_MB_CODE_TX_INACTIVE ) {
-      writeTxMailbox(first_tx_mb, msg);
-      return 1; /* transmit entry accepted */
-    }
-    else {
-      // CAN_message_t msg_copy = msg;
-      msg->mb = first_tx_mb;
-      add_buf(&tx_buf,msg); /* queue if no mailboxes found */
-      return -1; /* transmit entry failed, no mailboxes available, queued */
-    }
-  // }
+  int first_tx_mb = getFirstTxBox();
+  if ( FLEXCAN_get_code(FLEXCANb_MBn_CS(_bus, first_tx_mb)) == FLEXCAN_MB_CODE_TX_INACTIVE ) {
+    writeTxMailbox(first_tx_mb, msg);
+    return 1; /* transmit entry accepted */
+  }
+  else {
+    msg->mb = first_tx_mb;
+    add_buf(&tx_buf,msg); /* queue if no mailboxes found */
+    return -1; /* transmit entry failed, no mailboxes available, queued */
+  }
   for (uint8_t i = mailboxOffset(); i < FLEXCANb_MAXMB_SIZE(_bus); i++) {
     if ( FLEXCAN_get_code(FLEXCANb_MBn_CS(_bus, i)) == FLEXCAN_MB_CODE_TX_INACTIVE ) {
       writeTxMailbox(i, msg);
       return 1; /* transmit entry accepted */
     }
   }
-  // CAN_message_t msg_copy = msg;
   msg->mb = -1;
   add_buf(&tx_buf,msg); /* queue if no mailboxes found */
   return -1; /* transmit entry failed, no mailboxes available, queued */
 }
 
-void onReceive_Mb(int8_t mb_num, _MB_ptr handler) {
-  if ( FIFO == mb_num ) {
-    _mbHandlers[0] = handler;
-    return;
-  }
-  _mbHandlers[mb_num] = handler;
-}
+// void onReceive_Mb(int8_t mb_num, _MB_ptr handler) {
+//   if ( FIFO == mb_num ) {
+//     _mbHandlers[0] = handler;
+//     return;
+//   }
+//   _mbHandlers[mb_num] = handler;
+// }
 
-void onReceive(_MB_ptr handler) {
-  _mainHandler = handler;
-}
+// void onReceive(_MB_ptr handler) {
+//   _mainHandler = handler;
+// }
 
 void onTransmit_Mb(int8_t mb_num, _MB_ptr handler) {
   if ( FIFO == mb_num ) {
@@ -641,8 +624,8 @@ void canbus_execute_buf(sys_state_t state)
 {
   spin_lock = true;
   int txBox = mailboxOffset();
-  for (;;)
-  {
+  // for (;;)
+  // {
     for (int i = txBox ; i < FLEXCANb_MAXMB_SIZE(_bus); i++) {
       if (txBox >= FLEXCANb_MAXMB_SIZE(_bus) || !(tx_buf.count) || !canbus_On) 
         break;
@@ -654,14 +637,14 @@ void canbus_execute_buf(sys_state_t state)
         break;
       }
     }
-  }
+  // }
   // if (tx_buf.count)
     // protocol_enqueue_rt_command(canbus_execute_buf);
   spin_lock = false;
 }
 
 void canbus_events(uint_fast16_t state) {
-  UNUSED(state);
+  // UNUSED(state);
   // static int maxCount;
   int bufCount = tx_buf.count;
   if (bufCount)
@@ -676,6 +659,7 @@ void canbus_events(uint_fast16_t state) {
     // maxCount = bufCount = 0;
   // if (sync_msg.active && sync_msg.msg)
   //   report_Frame(sync_msg.msg);
+  on_execute_realtime(state);
 }
 
 void flexcan_interrupt(void) {
@@ -880,7 +864,7 @@ void flexcan_interrupt(void) {
   if (canbus_On != _state) 
       canbus_On = _state;
 
-  FLEXCANb_ESR1(_bus) |= FLEXCANb_ESR1(_bus);
+  FLEXCANb_ESR1(_bus) |= reg_esr;
   asm volatile ("dsb");	
 }
 
@@ -905,18 +889,13 @@ bool canbus_detachObj (CANListener *_listener) {
   return false;
 }
 
-void set_pins(){
+void can_init() {
   //Set pins
   IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B0_02 =  0x10; // pin 1 T4B1+B2
   IOMUXC_SW_PAD_CTL_PAD_GPIO_AD_B0_02 = 0x10B0; // pin 1 T4B1+B2
   IOMUXC_FLEXCAN2_RX_SELECT_INPUT = 0x01;
   IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B0_03 = 0x10; // pin 0 T4B1+B2
   IOMUXC_SW_PAD_CTL_PAD_GPIO_AD_B0_03 = 0x10B0; // pin 0 T4B1+B2
-  
-}
-
-void can_init() {
-  set_pins();
   //Set interupt isr
   NVIC_SET_PRIORITY(nvicIrq,12);
   NVIC_DISABLE_IRQ(IRQ_CAN2);
@@ -966,7 +945,7 @@ void canbus_begin(_MB_ptr handler, uint32_t baudrate) {
   }
   _mainHandler = handler;
   if (currentBitrate != baudrate)
-    setBaudRate(baudrate,TX);
+    setBaudRate(baudrate,FLEXCAN_TX);
   // FLEXCAN_EnterFreezeMode();
   // for ( uint8_t mb_num = 0; mb_num < FLEXCANb_MAXMB_SIZE(_bus); mb_num++ ) {
   //   enableMBInterrupt((int)mb_num, 1);
@@ -1091,6 +1070,8 @@ void canbus_init()
   can_init();
   on_report_options = grbl.on_report_options;
   grbl.on_report_options = onReportOptions;
+	on_execute_realtime = grbl.on_execute_realtime;
+  grbl.on_execute_realtime = canbus_events;
   // pinMode(LED_BUILTIN,OUTPUT);
   // digitalToggleFast(LED_BUILTIN);
 }
