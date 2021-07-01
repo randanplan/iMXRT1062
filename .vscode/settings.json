@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "hal.h": "c",
+        "grbl.h": "c",
+        "config.h": "c"
+    }
+}

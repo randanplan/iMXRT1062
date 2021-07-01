@@ -40,17 +40,6 @@ typedef struct can_rx_sync_buffer_t{
     CAN_message_t data[SIZE_RX_SYNC_BUFFER];
 } can_rx_sync_buffer_t;
 
-typedef struct CAN_sync_message_t{
-  volatile bool active;
-  volatile bool ready;
-  int8_t mb;
-  uint32_t id;
-  uint32_t time;
-  uint32_t time_prev;
-  CAN_message_t *msg;
-  CAN_message_t *msg_prev;
-}CAN_sync_message_t;
-
 static CAN_sync_message_t sync_msg = {0};
 
 static can_rx_sync_buffer_t rx_sync_buf = {0}; 
@@ -61,7 +50,7 @@ static CANListener *listener[SIZE_LISTENERS];
 
 static int mailboxOffset();
 void canbus_execute_buf(sys_state_t state);
-int canbus_write_sync_msg(CAN_message_t *msg, bool enable);
+CAN_sync_message_t *canbus_write_sync_msg(CAN_message_t *msg, bool enable);
 volatile uint32_t fifo_filter_table[32][6] = {0};
 volatile uint32_t mb_filter_table[64][6] = {0};
 static _MB_ptr _mbHandlers[64] = {0}; /* individual mailbox handlers */
@@ -123,7 +112,7 @@ static bool add_sync_msg(can_rx_sync_buffer_t *buf, CAN_message_t *msg)
   else{
     /* add the element to the ring */
     if (sync_msg.msg)
-      sync_msg.msg_prev = sync_msg.msg;
+      // sync_msg.msg_prev = sync_msg.msg;
     *sync_msg.msg = buf->data[buf->head];
     memcpy (sync_msg.msg, msg, sizeof(CAN_message_t ));
     /* bump the head to point to the next free entry */
@@ -162,12 +151,11 @@ static bool add_buf (can_tx_buffer_t *buf, CAN_message_t *msg)
   bool result = true;
   nextEntry = (buf->head + 1) % buf->size;
   /* check if the ring buffer is full */
+  while (spin_lock);
   if (nextEntry == buf->tail) {
-    // spin_lock = true;
     protocol_enqueue_rt_command(canbus_execute_buf);
     system_set_exec_state_flag(EXEC_RT_COMMAND);
-    while (spin_lock);
-    // result = false;
+    // while (spin_lock);
   }
   else{
     /* add the element to the ring */
@@ -655,17 +643,17 @@ void canbus_execute_buf(sys_state_t state)
   int txBox = mailboxOffset();
   for (;;)
   {
-    CAN_message_t tx_msg;// = {0};
-    remove_buf(&tx_buf,&tx_msg);
     for (int i = txBox ; i < FLEXCANb_MAXMB_SIZE(_bus); i++) {
+      if (txBox >= FLEXCANb_MAXMB_SIZE(_bus) || !(tx_buf.count) || !canbus_On) 
+        break;
+      CAN_message_t tx_msg;// = {0};
+      remove_buf(&tx_buf,&tx_msg);
       if ( FLEXCAN_get_code(FLEXCANb_MBn_CS(_bus, i)) == FLEXCAN_MB_CODE_TX_INACTIVE ){
         writeTxMailbox(i, &tx_msg);
         txBox++;
         break;
       }
     }
-    if (txBox >= FLEXCANb_MAXMB_SIZE(_bus) || !(tx_buf.count)) 
-      break;
   }
   // if (tx_buf.count)
     // protocol_enqueue_rt_command(canbus_execute_buf);
@@ -713,8 +701,11 @@ void flexcan_interrupt(void) {
       // frame_distribution(&msg);
       // if (fifo_filter_match(msg.id))
       if (sync_msg.active && sync_msg.id == msg.id){
-        // digitalToggleFast(LED_BUILTIN);
-        add_sync_msg(&rx_sync_buf,&msg);
+        memcpy(&sync_msg.msg->buf,&msg.buf,msg.len);
+        sync_msg.ready = true;
+        sync_msg.active = false;
+        sync_msg.time_end = micros();//hal.get_elapsed_ticks();
+        // add_sync_msg(&rx_sync_buf,&msg);
       }
       else {
         mbCallbacks(FIFO,&msg);
@@ -754,10 +745,17 @@ void flexcan_interrupt(void) {
       // }
       (void)FLEXCANb_TIMER(_bus);
       writeIFLAGBit(mb_num);
-      // else {
+      if (sync_msg.active && sync_msg.id == msg.id){
+        memcpy(&sync_msg.msg->buf,&msg.buf,msg.len);
+        sync_msg.ready = true;
+        sync_msg.active = false;
+        sync_msg.time_end = micros();//hal.get_elapsed_ticks();
+        // add_sync_msg(&rx_sync_buf,&msg);
+      }
+      else {
         mbCallbacks(mb_num,&msg);
         struct2queueRx(&msg); /* store frame in queue */
-      // }
+      }
     }
 
     else if ( mb_code == FLEXCAN_MB_CODE_RX_EMPTY ) {
@@ -782,7 +780,7 @@ void flexcan_interrupt(void) {
       //   if ( _mainTxHandler ) _mainTxHandler(&msg);
       // }
   
-      if (tx_buf.count > 0) {
+      if (tx_buf.count > 0 && !spin_lock) {
         CAN_message_t frame = {0};
         remove_buf(&tx_buf,&frame);
       //   // int result = 0;
@@ -810,20 +808,22 @@ void flexcan_interrupt(void) {
       msg.mb = mb_num;
       msg.timestamp = code & 0xFFFF;
       // msg.bus = busNumber;
-      for ( uint8_t i = 0; i < (8 >> 2); i++ ) for ( int8_t d = 0; d < 4 ; d++ ) msg.buf[(4 * i) + 3 - d] = (uint8_t)(mbxAddr[2 + i] >> (8 * d));
+      if (msg.len == 8) for ( uint8_t i = 0; i < (8 >> 2); i++ ) for ( int8_t d = 0; d < 4 ; d++ ) msg.buf[(4 * i) + 3 - d] = (uint8_t)(mbxAddr[2 + i] >> (8 * d));
+      
       if ( mb_num == FIFO ) {
         if ( _mbTxHandlers[0] ) _mbTxHandlers[0](&msg);
         if ( _mainTxHandler ) _mainTxHandler(&msg);
       }
       
-      if (sync_msg.active){
-        mbxAddr[0] = FLEXCAN_MB_CS_CODE(FLEXCAN_MB_CODE_TX_ONCE);
-        (void)FLEXCANb_TIMER(_bus);
-        // writeIFLAGBit(mb_num);
-        // digitalToggleFast(LED_BUILTIN);
-        // add_sync_msg(&rx_sync_buf,&msg);
-      }
-      else if (tx_buf.count > 0) {
+      // if (sync_msg.active && sync_msg.id == msg.id){
+      //   memcpy(&sync_msg.msg->buf,&msg.buf,msg.len);
+      //   sync_msg.ready = true;
+      //   sync_msg.active = false;
+      //   sync_msg.time_end = micros();//hal.get_elapsed_ticks();
+      //   // add_sync_msg(&rx_sync_buf,&msg);
+      // }
+      // else
+       if (tx_buf.count > 0 && !spin_lock) {
         CAN_message_t frame = {0};
         remove_buf(&tx_buf,&frame);
         writeTxMailbox(mb_num, &frame);
@@ -852,9 +852,12 @@ void flexcan_interrupt(void) {
       // add_sync_msg(&rx_sync_buf,&msg);
       (void)FLEXCANb_TIMER(_bus);
       writeIFLAGBit(mb_num);
-      if (sync_msg.active && sync_msg.mb == mb_num){
-        // digitalToggleFast(LED_BUILTIN);
-        add_sync_msg(&rx_sync_buf,&msg);
+      if (sync_msg.active && sync_msg.id == msg.id){
+        memcpy(&sync_msg.msg->buf,&msg.buf,msg.len);
+        sync_msg.ready = true;
+        sync_msg.active = false;
+        sync_msg.time_end = micros();//hal.get_elapsed_ticks();
+        // add_sync_msg(&rx_sync_buf,&msg);
       }
       // if (tx_buf.count > 0) {
         // CAN_message_t frame = {0};
@@ -941,10 +944,10 @@ void can_init() {
   FLEXCANb_MCR(_bus) |= FLEXCAN_MCR_WAK_SRC; // WAKE-UP LOW-PASS FILTER
   FLEXCANb_MCR(_bus) &= ~0x8800; // disable DMA and FD (valid bits are reserved in legacy controllers)
 
-  FLEXCANb_CTRL2(_bus) |= FLEXCAN_CTRL2_RRS; // store remote frames
-  // FLEXCANb_CTRL2(_bus) |= FLEXCAN_CTRL2_EACEN; /* handles the way filtering works. Library adjusts to whether you use this or not */ 
+  // FLEXCANb_CTRL2(_bus) |= FLEXCAN_CTRL2_RRS; // store remote frames
+  FLEXCANb_CTRL2(_bus) |= FLEXCAN_CTRL2_EACEN; /* handles the way filtering works. Library adjusts to whether you use this or not */ 
   FLEXCANb_CTRL2(_bus) |= FLEXCAN_CTRL2_MRP; // mailbox > FIFO priority.
-  FLEXCANb_MCR(_bus) |= FLEXCAN_MCR_WRN_EN;
+  // FLEXCANb_MCR(_bus) |= FLEXCAN_MCR_WRN_EN;
   FLEXCANb_MCR(_bus) |= FLEXCAN_MCR_WAK_MSK;
  
   enableFIFO(0); /* clears all data and layout to legacy mailbox mode */
@@ -979,14 +982,14 @@ bool canbus_connected() {
   return canbus_On;
 }
 
-int canbus_write_sync_msg(CAN_message_t *msg, bool enable){
+CAN_sync_message_t *canbus_write_sync_msg(CAN_message_t *msg, bool enable){
   if (!enable){
-    sync_msg.active = false;
+    sync_msg = (CAN_sync_message_t){0};
     // writeIFLAGBit(sync_msg.mb);
-    FLEXCANb_MBn_CS(_bus, sync_msg.mb) = FLEXCAN_MB_CS_CODE(FLEXCAN_MB_CODE_TX_INACTIVE);
+    // FLEXCANb_MBn_CS(_bus, sync_msg.mb) = FLEXCAN_MB_CS_CODE(FLEXCAN_MB_CODE_TX_INACTIVE);
     // (void)FLEXCANb_TIMER(_bus);
     // sync_msg = (CAN_sync_message_t){0};
-    return 0;
+    return NULL;
   }
 
   int mbox = getFirstTxBox();
@@ -995,25 +998,15 @@ int canbus_write_sync_msg(CAN_message_t *msg, bool enable){
     sync_msg.active = true;
     sync_msg.mb = mbox;
     sync_msg.id = msg->id;
-    sync_msg.msg = NULL;
-    sync_msg.msg_prev = NULL;
-
-    writeIFLAGBit(mbox);
-    uint32_t code = 0;
-    volatile uint32_t *mbxAddr = &(*(volatile uint32_t*)(_bus + 0x80 + (mbox * 0x10)));
-    mbxAddr[0] = FLEXCAN_MB_CS_CODE(FLEXCAN_MB_CODE_TX_INACTIVE);
-    mbxAddr[1] = (( msg->flags.extended ) ? ( msg->id & FLEXCAN_MB_ID_EXT_MASK ) : FLEXCAN_MB_ID_IDSTD(msg->id));
-    if ( msg->flags.remote ) code |= (1UL << 20);
-    if ( msg->flags.extended ) code |= (3UL << 21);
-    for ( uint8_t i = 0; i < (8 >> 2); i++ ) mbxAddr[2 + i] = (msg->buf[0 + i * 4] << 24) | (msg->buf[1 + i * 4] << 16) | (msg->buf[2 + i * 4] << 8) | msg->buf[3 + i * 4];
-    code |= msg->len << 16;
-    mbxAddr[0] = code | FLEXCAN_MB_CS_CODE(FLEXCAN_MB_CODE_TX_ONCE);
-    // (void)FLEXCANb_TIMER(_bus);
+    sync_msg.time = micros();//hal.get_elapsed_ticks();
+    // sync_msg.msg_prev = sync_msg.msg;// NULL;
+    sync_msg.msg = msg;
+    writeTxMailbox(mbox,msg);
   }
-  char msg_c[30];
-  sprintf(msg_c,"CAN sync msg mb=%u",mbox);
-  report_message(msg_c,Message_Info);
-  return mbox;
+  // char msg_c[30];
+  // sprintf(msg_c,"CAN sync msg mb=%u",mbox);
+  // report_message(msg_c,Message_Info);
+  return &sync_msg;
 }
 
 int canbus_write_blocking(CAN_message_t *msg, bool block)

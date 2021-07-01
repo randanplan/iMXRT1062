@@ -1,0 +1,34 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"hal.h": "c",
+			"grbl.h": "c",
+			"config.h": "c",
+			"can_t4.h": "c",
+			"*.a": "cpp",
+			"my_machine.h": "c",
+			"imxrt_flexcan.h": "c",
+			"*.tpp": "c",
+			"flexcan_t4.h": "c",
+			"circular_buffer.h": "c",
+			"wprogram.h": "c",
+			"avr_functions.h": "c",
+			"wiring.h": "c",
+			"can.h": "c",
+			"arduino.h": "c",
+			"kinetis_can_t4.h": "c",
+			"report.h": "c",
+			"u8x8.h": "c",
+			"u8g2.h": "c",
+			"core_pins.h": "c",
+			"system.h": "c",
+			"usb_serial.h": "c",
+			"spindle_sync.h": "c"
+		}
+	}
+}

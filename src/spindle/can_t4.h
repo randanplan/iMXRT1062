@@ -38,6 +38,17 @@ typedef struct CAN_message_t {
   bool seq;         // sequential frames
 } CAN_message_t;
 
+typedef struct CAN_sync_message_t{
+  volatile bool active;
+  volatile bool ready;
+  int8_t mb;
+  uint32_t id;
+  uint32_t time;
+  uint32_t time_end;
+  CAN_message_t *msg;
+  // CAN_message_t *msg_prev;
+}CAN_sync_message_t;
+
 typedef enum FLEXCAN_PINS {
   ALT = 0,
   DEF = 1,
@@ -228,7 +239,7 @@ extern void canbus_begin(_MB_ptr handler, uint32_t baudrate);
 extern bool canbus_connected();
 extern int canbus_write(CAN_message_t *msg);
 extern int canbus_write_blocking(CAN_message_t *msg, bool block);
-extern int canbus_write_sync_msg(CAN_message_t *msg, bool enable);
+extern CAN_sync_message_t *canbus_write_sync_msg(CAN_message_t *msg, bool enable);
 extern bool canbus_attachObj (CANListener *_listener);
 extern bool canbus_detachObj (CANListener *_listener);
 
