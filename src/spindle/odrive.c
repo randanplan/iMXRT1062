@@ -837,22 +837,6 @@ void sp_ms_event(){
 
 	if (ms >= last_1ms + 1){
 		last_1ms = ms;
-	if (sp_p.isAlive){
-
-		// if (msg_debug[0] != '\0'){
-		// 	report_message(msg_debug,Message_Plain);
-		// 	memset(&msg_debug,0,sizeof(msg_debug));
-		// }
-
-		if ((ms - sp_p.last_heartbeat) > odrive.can_timeout){
-			sp_p.isAlive = false;
-			memset(&sp_p,0,sizeof(sp_p));
-			memset(&flag,0,sizeof(flag));
-			for(uint_fast8_t idx = 0; idx < (sizeof(frames_periodic) / sizeof(periodic_frame_t)); idx++)
-				frames_periodic[idx].active = Off;
-			hal.spindle.get_data = NULL;
-			report_message("CAN timeout",Message_Info);
-		}
 		
 	}
   
